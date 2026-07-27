@@ -12,7 +12,11 @@ import type { CardDetail, CardSummary } from "./types";
  *
  * Partner keys (X-Api-Key / X-Api-Secret in .env.local) lift the rate limit
  * to 10k req/day; a global 4-wide limiter + per-request fetch budget keeps
- * usage far below that. 429 responses trigger a 1h backoff.
+ * usage far below that. A 429 backs off for exactly as long as the API's own
+ * `Retry-After` header says (a brief burst-limit hiccup, not the daily cap,
+ * is the usual cause — the daily count is generous) — falling back to a
+ * short default only if that header is missing, and capped so a single bad
+ * response can never stall pricing for very long.
  */
 
 const API = "https://api.renaissos.com";
@@ -20,7 +24,8 @@ const PRICE_TTL_MS = 1000 * 60 * 60 * 24;
 const FETCH_BUDGET = 24; // max uncached codes fetched per overlay call
 const MAX_CONCURRENT = 4; // global cap on in-flight Renaiss requests
 const BACKOFF_KEY = "renaiss-backoff-until";
-const BACKOFF_MS = 1000 * 60 * 60;
+const DEFAULT_BACKOFF_MS = 1000 * 30; // used only when Retry-After is absent
+const MAX_BACKOFF_MS = 1000 * 60 * 10; // ceiling, however long Retry-After asks for
 
 interface RenaissSearchResult {
   game: string;
@@ -145,7 +150,7 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 
 /**
  * GET a Renaiss API path as JSON through the global limiter. Returns null on
- * any failure (and starts the 1h backoff on 429).
+ * any failure (and starts a backoff on 429 — see `DEFAULT_BACKOFF_MS` above).
  */
 export async function renaissApiJson(path: string): Promise<unknown | null> {
   const backoffUntil =
@@ -158,7 +163,12 @@ export async function renaissApiJson(path: string): Promise<unknown | null> {
     }).catch(() => null);
     if (!res) return null;
     if (res.status === 429) {
-      kvSet(BACKOFF_KEY, Date.now() + BACKOFF_MS);
+      const retryAfterSec = Number(res.headers.get("retry-after"));
+      const waitMs =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, MAX_BACKOFF_MS)
+          : DEFAULT_BACKOFF_MS;
+      kvSet(BACKOFF_KEY, Date.now() + waitMs);
       return null;
     }
     if (!res.ok) return null;
