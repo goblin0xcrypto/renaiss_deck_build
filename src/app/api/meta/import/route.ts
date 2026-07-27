@@ -68,6 +68,21 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * Behind Railway's edge proxy, `req.url` reflects the internal
+ * request (e.g. `http://localhost:8080/...`) — building a redirect target
+ * from it sends every external client (a phone scanning the deck-poster QR
+ * code, in particular) to an address only reachable from inside the
+ * container. `X-Forwarded-Host`/`X-Forwarded-Proto` carry the real
+ * client-facing host; `req.nextUrl` is the correct fallback for local dev,
+ * where there's no proxy in front and those headers aren't set.
+ */
+function publicOrigin(req: NextRequest): string {
+  const host = req.headers.get("x-forwarded-host") ?? req.nextUrl.host;
+  const proto = req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "");
+  return `${proto}://${host}`;
+}
+
+/**
  * GET variant of the same import, for use as a plain scannable/shareable
  * link (the deck-poster QR code encodes this URL): creates the deck, then
  * redirects straight to its builder page. Each visit creates a fresh deck —
@@ -79,5 +94,7 @@ export async function GET(req: NextRequest) {
   if (!result) {
     return NextResponse.json({ error: "archetype not found" }, { status: 404 });
   }
-  return NextResponse.redirect(new URL(`/decks/${result.deckId}`, req.url));
+  return NextResponse.redirect(
+    new URL(`/decks/${result.deckId}`, publicOrigin(req))
+  );
 }
