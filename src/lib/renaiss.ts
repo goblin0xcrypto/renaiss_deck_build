@@ -10,19 +10,27 @@ import type { CardDetail, CardSummary } from "./types";
  * (`OP16-056` = print 1, `OP16-056_p1` = print 2). Cards Renaiss doesn't
  * cover keep their TCGPlayer price as a labelled fallback.
  *
- * Partner keys (X-Api-Key / X-Api-Secret in .env.local) lift the rate limit
- * to 10k req/day; a global 4-wide limiter + per-request fetch budget keeps
- * usage far below that. A 429 backs off for exactly as long as the API's own
- * `Retry-After` header says (a brief burst-limit hiccup, not the daily cap,
- * is the usual cause — the daily count is generous) — falling back to a
- * short default only if that header is missing, and capped so a single bad
- * response can never stall pricing for very long.
+ * Partner keys (X-Api-Key / X-Api-Secret in .env.local) lift the daily rate
+ * limit to 10k req/day, but Renaiss also enforces a much tighter short-window
+ * burst limit that a naive concurrent blast trips well before the daily cap
+ * is anywhere close to used — so requests are paced with both a low
+ * concurrency cap and a minimum spacing between request starts (see
+ * MAX_CONCURRENT/MIN_INTERVAL_MS below), plus a per-request fetch budget. A
+ * 429 backs off for exactly as long as the API's own `Retry-After` header
+ * says, falling back to a short default only if that header is missing, and
+ * capped so a single bad response can never stall pricing for very long.
  */
 
 const API = "https://api.renaissos.com";
 const PRICE_TTL_MS = 1000 * 60 * 60 * 24;
 const FETCH_BUDGET = 24; // max uncached codes fetched per overlay call
-const MAX_CONCURRENT = 4; // global cap on in-flight Renaiss requests
+// The 10k/day partner quota is generous, but Renaiss also enforces a much
+// tighter short-window burst limit that a naive 4-wide concurrent blast
+// trips almost immediately (observed in production: 429s within seconds of
+// a page load's worth of lookups, nowhere near the daily cap). Keep both
+// low — a slower fill-in beats an hour-long outage every time it happens.
+const MAX_CONCURRENT = 2; // global cap on in-flight Renaiss requests
+const MIN_INTERVAL_MS = 350; // minimum spacing between request starts
 const BACKOFF_KEY = "renaiss-backoff-until";
 const DEFAULT_BACKOFF_MS = 1000 * 30; // used only when Retry-After is absent
 const MAX_BACKOFF_MS = 1000 * 60 * 10; // ceiling, however long Retry-After asks for
@@ -131,7 +139,12 @@ function displayTierRank(r: RenaissSearchResult): number {
 }
 
 // Global request limiter + per-code dedupe, shared across concurrent routes.
+// Paces requests two ways: a concurrency cap (MAX_CONCURRENT in flight at
+// once) and a minimum spacing between request starts (MIN_INTERVAL_MS) —
+// the cap alone still lets requests fire back-to-back the instant a slot
+// frees up, which is exactly the kind of burst that trips Renaiss's limiter.
 let inFlight = 0;
+let lastStart = 0;
 const waiters: (() => void)[] = [];
 const inFlightByCode = new Map<string, Promise<void>>();
 
@@ -139,6 +152,9 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   while (inFlight >= MAX_CONCURRENT) {
     await new Promise<void>((resolve) => waiters.push(resolve));
   }
+  const wait = lastStart + MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  lastStart = Date.now();
   inFlight++;
   try {
     return await fn();
