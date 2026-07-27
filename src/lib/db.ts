@@ -3,9 +3,14 @@ import path from "path";
 
 let db: Database.Database | null = null;
 
+// DATA_DIR points at a mounted persistent volume in production (e.g. Railway,
+// where the app root itself is rebuilt/replaced on every deploy); local dev
+// falls back to the repo root so nothing changes for local use.
+const DATA_DIR = process.env.DATA_DIR || process.cwd();
+
 export function getDb(): Database.Database {
   if (db) return db;
-  db = new Database(path.join(process.cwd(), "data.db"));
+  db = new Database(path.join(DATA_DIR, "data.db"));
   db.pragma("journal_mode = WAL");
   db.exec(`
     CREATE TABLE IF NOT EXISTS card_stats (
