@@ -185,6 +185,20 @@ export async function renaissApiJson(path: string): Promise<unknown | null> {
           ? Math.min(retryAfterSec * 1000, MAX_BACKOFF_MS)
           : DEFAULT_BACKOFF_MS;
       kvSet(BACKOFF_KEY, Date.now() + waitMs);
+      // Full detail for reporting to Renaiss (their response only — no
+      // request secrets in here), so a recurrence is captured in `railway
+      // logs` instead of only leaving a bare timestamp behind.
+      const body = await res.text().catch(() => "");
+      console.error(
+        "[renaiss] 429 rate limited:",
+        JSON.stringify({
+          time: new Date().toISOString(),
+          path,
+          waitMs,
+          responseHeaders: Object.fromEntries(res.headers.entries()),
+          body: body.slice(0, 2000),
+        })
+      );
       return null;
     }
     if (!res.ok) return null;
