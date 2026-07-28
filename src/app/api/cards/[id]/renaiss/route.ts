@@ -40,6 +40,14 @@ export interface RenaissCardDetail {
   pageUrl?: string;
 }
 
+interface CachedRow {
+  href: string | null;
+  price_usd: number;
+  grade_label: string | null;
+  confidence: string | null;
+  last_sale_at: string | null;
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -48,18 +56,37 @@ export async function GET(
   const db = getDb();
   let graded = false;
   let row = db
-    .prepare("SELECT href FROM renaiss_prices WHERE card_id = ?")
-    .get(id) as { href: string | null } | undefined;
+    .prepare(
+      "SELECT href, price_usd, grade_label, confidence, last_sale_at FROM renaiss_prices WHERE card_id = ?"
+    )
+    .get(id) as CachedRow | undefined;
   if (!row?.href) {
     // no raw-English tier — fall back to the display-only graded match
     row = db
-      .prepare("SELECT href FROM renaiss_graded WHERE card_id = ?")
-      .get(id) as { href: string | null } | undefined;
+      .prepare(
+        "SELECT href, price_usd, grade_label, confidence, last_sale_at FROM renaiss_graded WHERE card_id = ?"
+      )
+      .get(id) as CachedRow | undefined;
     graded = true;
   }
   if (!row?.href) {
     return NextResponse.json({ tracked: false } satisfies RenaissCardDetail);
   }
+
+  // A basic payload built purely from what we already have locally — used
+  // whenever the enrichment call below can't reach the API (rate-limited,
+  // network hiccup, etc.). We *know* this card is tracked (that's exactly
+  // what the row above proves), so degrading to "tracked: false" in that
+  // case would be reporting something we know to be false.
+  const basic: RenaissCardDetail = {
+    tracked: true,
+    graded,
+    priceUsd: row.price_usd,
+    gradeLabel: row.grade_label ?? undefined,
+    confidence: row.confidence,
+    lastSaleAt: row.last_sale_at,
+    pageUrl: `https://index.renaissos.com${row.href}`,
+  };
 
   const key = `renaiss-detail:${graded ? "g" : "r"}:${row.href}`;
   const cached = kvGet<RenaissCardDetail>(key, TTL_MS);
@@ -71,9 +98,9 @@ export async function GET(
     renaissApiJson(`${base}/fmv-series`),
   ])) as [any, any];
   if (!detail) {
-    // Stale beats nothing; otherwise report untracked for this visit only
-    if (cached) return NextResponse.json(cached.value);
-    return NextResponse.json({ tracked: false } satisfies RenaissCardDetail);
+    // Stale beats nothing; otherwise fall back to the basic local payload —
+    // never the hard "untracked" claim, since we know that's wrong here.
+    return NextResponse.json(cached ? cached.value : basic);
   }
 
   const cents = (v: unknown): number | null =>
