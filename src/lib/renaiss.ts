@@ -173,8 +173,17 @@ export async function renaissApiJson(path: string): Promise<unknown | null> {
     kvGet<number>(BACKOFF_KEY, Number.MAX_SAFE_INTEGER)?.value ?? 0;
   if (Date.now() < backoffUntil) return null;
   return withSlot(async () => {
+    const reqHeaders = authHeaders();
+    // Masked fingerprint of what we actually sent on THIS request — proves
+    // (or disproves) whether the anonymous-tier downgrade correlates with
+    // us ever sending a key-less/malformed request, rather than just
+    // confirming the env var exists in general.
+    const sentKeyFingerprint = reqHeaders["X-Api-Key"]
+      ? `${reqHeaders["X-Api-Key"].slice(0, 6)}…${reqHeaders["X-Api-Key"].slice(-4)} (len ${reqHeaders["X-Api-Key"].length})`
+      : "MISSING";
+    const sentSecretPresent = !!reqHeaders["X-Api-Secret"];
     const res = await fetch(`${API}${path}`, {
-      headers: authHeaders(),
+      headers: reqHeaders,
       signal: AbortSignal.timeout(10000),
     }).catch(() => null);
     if (!res) return null;
@@ -194,6 +203,8 @@ export async function renaissApiJson(path: string): Promise<unknown | null> {
         JSON.stringify({
           time: new Date().toISOString(),
           path,
+          sentKeyFingerprint,
+          sentSecretPresent,
           waitMs,
           responseHeaders: Object.fromEntries(res.headers.entries()),
           body: body.slice(0, 2000),
